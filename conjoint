@@ -1,0 +1,212 @@
+
+#Loads in the package, 'supports us' in designing choice experiments
+library("support.CEs")
+library("dplyr")
+#FIRST FASE: EXPERIMENTAL DESIGN
+
+# Create questionnaire
+## Define attributes/levels
+#list
+atts <- list(brand=c("Coca-Cola","Pepsi", "Generic"),
+             type=c("Regular","Light", "Stevia"),
+             price=c("1.99","4.99"))
+
+
+
+## Create design 
+des <- rotation.design(attribute.names=atts,
+                       nalternatives=2,
+                       nblocks=1,
+                       randomize=F,
+                       seed=345)
+des
+
+## Print design as questionnaire
+questionnaire(des)
+
+#-------------------------------------------------------------------
+#SECOND FASE: COLLECT DATA 
+#transform questions to online form & distribute: DONE
+setwd("H:/MMA/P&R/Group assignment_conjoint")
+data <- read.csv("Benoot.csv")
+
+#Let's clean this up!
+data$V8 <- as.POSIXct(data$V8, format = "%Y-%m-%d %H:%M:%S") #StartDate
+data$V9 <- as.POSIXct(data$V9, format = "%Y-%m-%d %H:%M:%S") # EndDate
+data2 <-data %>% mutate(duration = V9 - V8) %>% filter(duration >60) %>% filter(Q49 == 1 | Q49 == 2)
+#people who filled out in less than 1 min are crazy
+#Filter out blank suveys (there were 3) & invalid answers (undecided sex)
+
+#Delete the first row (which contains names)
+data2 <- data2[-1,]
+#Take only the questions
+questions <- grep("^Q", names(data2), value = TRUE)
+data2 <- data2[,questions[1:(length(questions)-2)]] # Q49 & Q50 can also go
+
+
+create_binary_data <- function(x) {
+  data_fixed=matrix(data=0,nrow=dim(x)[1],ncol=dim(x)[2])
+  for (r in 1:dim(x)[1]) {
+    for (c in 1:dim(x)[2]) {
+      data_fixed[r,c]=as.numeric(as.matrix(x)[r,c])
+    
+    for (c in 1:dim(x)[2]) {
+      if (as.matrix(x)[r,c]=="1") { 
+        data_fixed[r,c]=1
+      } else { 
+        data_fixed[r,c]=0}
+      }
+    }
+  }
+  data_fixed
+}
+
+data_fixed2 <- create_binary_data(data2)
+data_fixed2
+
+
+
+#This leaves us with 37 valid responses
+#Convert this in a usable structure
+
+data3 <- as.data.frame(as.vector(t(data_fixed2)))
+data_clean <- unlist(data3)
+
+
+
+
+#--------------------------------------------------------
+
+# Create predictor variables
+ldmat <- make.design.matrix(choice.experiment.design=des,
+                            categorical.attributes=c("brand","type","price"),
+                            optout=FALSE,
+                            unlabeled=TRUE,
+                            binary=TRUE)
+#look at output
+ldmat
+
+#.determine X matrix
+x <- ldmat[4:9]
+
+n <- length(data_clean)/18 #1200/12 = 37 , 37 respondents
+ldat <- do.call(rbind, replicate(n, x, simplify = FALSE))
+
+
+#estimate model parameters
+
+out <- glm(data_clean~0+as.matrix(ldat), family = binomial(logit))
+summary(out)
+coef(out)
+
+
+#---------------------------
+#Calculate importances
+
+##create function that calculates the ranges
+
+calc_range <- function(x) {
+  x <-c(0,x)
+  return(max(x)-min(x))
+}
+
+##use function for every attribute in our analysis
+a <- calc_range(coef(out)[2:3])
+b <- calc_range(coef(out)[4:5])
+c <- calc_range(coef(out)[6])
+
+##normalize them
+tot <- (a+b+c)
+import1 <- a/tot
+import2 <- b/tot
+import3 <- c/tot
+
+# interpretation: this thing has an importance of X% 
+# Create a plot based on that:
+
+png("varimp.png") #create (empty) file whree the following plot will be written to
+barplot(c(import1, import2, import3), names.arg = c("Brand", "Type", "Price"), col="darkolivegreen4", axes = FALSE, ylim = c(0,.5), main = "Variable importances")
+axis(2,at= seq(0,.5,.1), lwd = 0,lwd.ticks = 1, las=1)
+dev.off() #write to the specified file
+
+
+#find optimal profile, find optimal product configuration
+##create full-factorial design
+full <- cbind(1,rep(c(0,1), each=9),
+              rep(rep(c(0,1), each=3),2),
+              rep(rep(c(1,0), each=3),2),
+              rep(c(0,1,0),6),
+              rep(c(1,0,0),6))
+full 
+
+#create all possible combinations of parameters.
+#each line represents a possible combination.
+#first column has all 1's, this is the intersect
+#We will make predictions about the utility
+
+##calculate utiflity for every profile
+utilities <- full%*%coef(out)
+utilities
+#coef(out) = vector of coefficients, regression parameters
+#matrix multiplication with full. (see drawing on paper sheet)
+
+##find optimum
+which.max(utilities)
+max <- full[which.max(utilities),] #product configuration with highest utility
+min <- full[which.min(utilities),] #product configuration with lowest utility
+
+
+
+#----------------------------------------------------------
+
+#estimate effect of price as continuous variable
+
+#ldmat: price as differences between the prices
+#optimum is the same: output: 1 0 1 1 8 
+
+#---------------------------------------------------------
+
+#How can we calculate compensating prices,? How much should we lower our price to let customer buy ticket online?
+#based on price as a continuous variable (to do it with categorical variables would make it harder)
+#utility for offline, weekend 10 euro
+c(1,0,1,0,1,1)%*%coef(out)  
+max%*%coef(out)
+min%*%coef(out)
+#utility for online, weekend 10
+c(1,0,0,10)%*%coef(out)
+#lower the price to increase utility
+#equate 2 produce configurations to eachother
+
+
+#lower your price from 10 euros to 8.5 euros.
+
+
+#-----------------------------------------------------------
+#estimate the price sensitivty for every individual respondent
+#prepare data for individual level parameters
+# estimate logistic regression for every respondent on all variables we have 
+#split data into list, where list is 12 data points for each respondent
+# then perform logistic regression 100 time seperately for every customer.
+
+
+#logistic regression results in warnings => because we do not have enough data, only 12 observations per respondent
+#bayesian models can overcome this problem
+
+#------
+
+#prepare data for individuel level parameters
+ldat_individual <- replicate(n, x, simplify = FALSE)
+data_clean_individual <- split(unlist(data_clean), f=rep(c(1:n),each=18))
+individual <- mapply(list, y_ind, ldat_ind, SIMPLIFY = FALSE)
+
+#create function so that we can use lapply
+logreglist <- function(x){
+  out <- glm(x[[1]]~0+as.matrix(x[[2]]),family = binomial(logit))
+  return(coef(out))
+}
+
+#estimate parameters for every item in the list
+#Every respondent gets a utility for every parameter 
+ind_coef <- lapply(individual, FUN = logreglist)
+res <- matrix(unlist(t(ind_coef)),nrow=n, byrow = TRUE)
+res
